@@ -16,6 +16,17 @@ class SolarAnalysisAI:
     def encode_image(self, image) -> str:
         """Convert PIL image to base64 string for API"""
         buffer = io.BytesIO()
+        
+        # Fix for RGBA to JPEG conversion issue
+        if image.mode == 'RGBA':
+            # Create white background and paste image on it
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            background.paste(image, mask=image.split()[3])  # Use alpha channel as mask
+            image = background
+        elif image.mode not in ('RGB', 'L'):
+            # Convert any other modes to RGB
+            image = image.convert('RGB')
+        
         image.save(buffer, format="JPEG")
         return base64.b64encode(buffer.getvalue()).decode()
     
@@ -102,84 +113,58 @@ class SolarAnalysisAI:
         
         try:
             response = requests.post(self.base_url, headers=headers, json=data)
+            
+            # Check if request was successful
             response.raise_for_status()
             
-            result = response.json()
+            # Debug: Print response details
+            st.write(f"**Response Status:** {response.status_code}")
+            
+            # Check if response has content
+            if not response.text.strip():
+                st.error("❌ Empty response from API")
+                return None
+            
+            # Try to parse JSON
+            try:
+                result = response.json()
+            except json.JSONDecodeError as json_err:
+                st.error(f"❌ Invalid JSON response: {json_err}")
+                st.write(f"**Raw Response:** {response.text[:500]}...")
+                return None
+            
+            # Check if response has expected structure
+            if 'choices' not in result or not result['choices']:
+                st.error("❌ Unexpected API response structure")
+                st.write(f"**Response:** {result}")
+                return None
+            
             content = result['choices'][0]['message']['content']
             
             # Extract JSON from response
             json_start = content.find('{')
             json_end = content.rfind('}') + 1
+            
+            if json_start == -1 or json_end == 0:
+                st.error("❌ No JSON found in AI response")
+                st.write(f"**AI Response:** {content}")
+                return None
+            
             json_str = content[json_start:json_end]
             
-            return json.loads(json_str)
-            
-        except Exception as e:
-            st.error(f"Analysis failed: {str(e)}")
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError as parse_err:
+                st.error(f"❌ Failed to parse AI response JSON: {parse_err}")
+                st.write(f"**Extracted JSON:** {json_str}")
+                return None
+                
+        except requests.exceptions.RequestException as req_err:
+            st.error(f"❌ API request failed: {req_err}")
             return None
-
-def main():
-    st.set_page_config(
-        page_title="Solar Rooftop Analysis AI",
-        page_icon="☀️",
-        layout="wide"
-    )
-    
-    st.title("☀️ AI-Powered Solar Rooftop Analysis")
-    st.markdown("Upload satellite imagery to get comprehensive solar installation assessments")
-    
-    # Sidebar for configuration
-    with st.sidebar:
-        st.header("Configuration")
-        api_key = st.text_input("OpenRouter API Key", type="password")
-        location = st.text_input("Property Location", placeholder="e.g., San Francisco, CA")
-        budget = st.number_input("Budget ($)", min_value=1000, max_value=100000, value=25000)
-        
-        st.markdown("---")
-        st.markdown("### About This Tool")
-        st.markdown("""
-        This AI assistant analyzes rooftop imagery to provide:
-        - Solar installation potential assessment
-        - Financial ROI calculations
-        - Installation recommendations
-        - Technical specifications
-        """)
-    
-    if not api_key:
-        st.warning("Please enter your OpenRouter API key in the sidebar")
-        return
-    
-    # Initialize AI analyzer
-    analyzer = SolarAnalysisAI(api_key)
-    
-    # File upload
-    uploaded_file = st.file_uploader(
-        "Upload Rooftop Image",
-        type=['png', 'jpg', 'jpeg'],
-        help="Upload satellite or aerial imagery of the rooftop"
-    )
-    
-    if uploaded_file:
-        # Display uploaded image
-        image = Image.open(uploaded_file)
-        
-        col1, col2 = st.columns([1, 1])
-        
-        with col1:
-            st.subheader("Uploaded Image")
-            st.image(image, caption="Rooftop Analysis Target", use_column_width=True)
-        
-        with col2:
-            if st.button("🔍 Analyze Solar Potential", type="primary"):
-                if not location:
-                    st.error("Please enter the property location")
-                    return
-                
-                with st.spinner("Analyzing rooftop with AI..."):
-                    analysis = analyzer.analyze_rooftop(image, location, budget)
-                
-                if analysis:
-                    display_analysis_results(analysis)
+        except Exception as e:
+            st.error(f"❌ Unexpected error: {str(e)}")
+            return None
 
 def display_analysis_results(analysis: Dict):
     """Display comprehensive analysis results"""
@@ -299,6 +284,103 @@ def display_analysis_results(analysis: Dict):
         st.write("**Next Steps:**")
         for step in recommendations['next_steps']:
             st.write(f"• {step}")
+
+def main():
+    # Set page config for Hugging Face Spaces
+    st.set_page_config(
+        page_title="Solar AI Assistant",
+        page_icon="☀️",
+        layout="wide"
+    )
+    
+    st.title("☀️ AI-Powered Solar Rooftop Analysis")
+    st.markdown("Upload satellite imagery to get comprehensive solar installation assessments")
+    
+    # Get API key from Hugging Face Secrets or user input
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    
+    # Sidebar for configuration
+    with st.sidebar:
+        st.header("Configuration")
+        
+        # If no environment variable, allow manual input
+        if not api_key:
+            api_key = st.text_input("OpenRouter API Key", type="password", 
+                                   help="Enter your OpenRouter API key")
+        else:
+            st.success("✅ API Key loaded from environment")
+        
+        location = st.text_input("Property Location", placeholder="e.g., San Francisco, CA")
+        budget = st.number_input("Budget ($)", min_value=1000, max_value=100000, value=25000)
+        
+        st.markdown("---")
+        st.markdown("### About This Tool")
+        st.markdown("""
+        This AI assistant analyzes rooftop imagery to provide:
+        - Solar installation potential assessment
+        - Financial ROI calculations
+        - Installation recommendations
+        - Technical specifications
+        """)
+        
+        st.markdown("---")
+        st.markdown("### How to Use")
+        st.markdown("""
+        1. Enter your OpenRouter API key (if not set in environment)
+        2. Specify the property location
+        3. Set your budget
+        4. Upload a rooftop image
+        5. Click 'Analyze Solar Potential'
+        """)
+    
+    if not api_key:
+        st.warning("⚠️ Please enter your OpenRouter API key in the sidebar to continue")
+        st.info("💡 Get your API key from [OpenRouter](https://openrouter.ai/keys)")
+        return
+    
+    # Initialize AI analyzer
+    analyzer = SolarAnalysisAI(api_key)
+    
+    # File upload section
+    st.subheader("📸 Upload Rooftop Image")
+    uploaded_file = st.file_uploader(
+        "Choose a rooftop image file",
+        type=['png', 'jpg', 'jpeg'],
+        help="Upload satellite or aerial imagery of the rooftop for analysis"
+    )
+    
+    if uploaded_file:
+        # Display uploaded image
+        image = Image.open(uploaded_file)
+        
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.subheader("📷 Uploaded Image")
+            # Fixed: Changed use_column_width to use_container_width
+            st.image(image, caption="Rooftop Analysis Target", use_container_width=True)
+            
+            # Image info
+            st.write(f"**Image Size:** {image.size[0]} x {image.size[1]} pixels")
+            st.write(f"**File Size:** {len(uploaded_file.getvalue()) / 1024:.1f} KB")
+        
+        with col2:
+            st.subheader("🔍 Analysis Controls")
+            
+            if not location:
+                st.error("⚠️ Please enter the property location in the sidebar")
+            else:
+                st.success(f"📍 Location: {location}")
+                st.info(f"💰 Budget: ${budget:,.2f}")
+                
+                if st.button("🚀 Analyze Solar Potential", type="primary", use_container_width=True):
+                    with st.spinner("🤖 Analyzing rooftop with AI... This may take a few moments."):
+                        analysis = analyzer.analyze_rooftop(image, location, budget)
+                    
+                    if analysis:
+                        display_analysis_results(analysis)
+                    else:
+                        st.error("❌ Analysis failed. Please check your API key and try again.")
 
 if __name__ == "__main__":
     main()
